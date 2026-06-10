@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ASR Hub — Edge STT Model Testing</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="logo">
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+          <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+          <line x1="12" y1="19" x2="12" y2="23"/>
+          <line x1="8" y1="23" x2="16" y2="23"/>
+        </svg>
+        <span>ASR Hub</span>
+      </div>
+      <nav class="nav">
+        <a href="#" class="nav-item active" data-tab="transcribe">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polygon points="5,3 19,12 5,21"/>
+          </svg>
+          Transcribe
+        </a>
+        <a href="#" class="nav-item" data-tab="benchmark">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="18" y1="20" x2="18" y2="10"/>
+            <line x1="12" y1="20" x2="12" y2="4"/>
+            <line x1="6" y1="20" x2="6" y2="14"/>
+          </svg>
+          Benchmark
+        </a>
+      </nav>
+      <div class="status-bar" id="statusBar">
+        <div class="status-row">
+          <div class="status-dot" id="statusDot"></div>
+          <span id="statusText">Checking...</span>
+        </div>
+        <select id="gpuSelector" class="gpu-selector" title="Select GPU for inference"></select>
+      </div>
+    </aside>
+
+    <!-- Main Content -->
+    <main class="content">
+      <!-- Transcribe Tab -->
+      <section class="tab-panel active" id="tab-transcribe">
+        <div class="panel-header">
+          <h1>Transcribe Audio</h1>
+          <p>Upload an audio file and test different STT models in real time.</p>
+        </div>
+
+        <!-- Model Selector -->
+        <div class="card">
+          <h3>Select Model</h3>
+          <div class="model-grid" id="modelGrid">
+            <!-- Populated by JS -->
+          </div>
+        </div>
+
+        <!-- Audio Input -->
+        <div class="card">
+          <h3>Audio Source</h3>
+          <div class="audio-input-area">
+            <div class="upload-zone" id="uploadZone">
+              <div class="upload-icon">
+                <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                  <polyline points="17,8 12,3 7,8"/>
+                  <line x1="12" y1="3" x2="12" y2="15"/>
+                </svg>
+              </div>
+              <p>Drag & drop an audio file or <span class="link">browse</span></p>
+              <p class="hint">Supports WAV, FLAC, MP3, OGG (max 500 MB)</p>
+              <input type="file" id="fileInput" accept="audio/*" hidden />
+            </div>
+            <div class="file-info hidden" id="fileInfo">
+              <div class="file-name" id="fileName"></div>
+              <button class="btn btn-sm btn-ghost" id="clearFile">Remove</button>
+            </div>
+          </div>
+          <button class="btn btn-primary btn-lg mt" id="transcribeBtn" disabled>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polygon points="5,3 19,12 5,21"/>
+            </svg>
+            Transcribe
+          </button>
+        </div>
+
+        <!-- Results -->
+        <div class="card hidden" id="resultsCard">
+          <h3>Transcription Result</h3>
+          <div class="metrics-row" id="metricsRow"></div>
+          <div class="transcript-box" id="transcriptBox">
+            <div class="transcript-header">
+              <span class="lang-badge" id="langBadge"></span>
+              <button class="btn btn-sm btn-ghost" id="copyBtn">Copy</button>
+            </div>
+            <div class="transcript-text" id="transcriptText"></div>
+          </div>
+          <details class="segments-detail">
+            <summary>Segments with timestamps</summary>
+            <div class="segments-list" id="segmentsList"></div>
+          </details>
+        </div>
+      </section>
+
+      <!-- Benchmark Tab -->
+      <section class="tab-panel" id="tab-benchmark">
+        <div class="panel-header">
+          <h1>Model Benchmark</h1>
+          <p>Compare performance across multiple models on the same audio file.</p>
+        </div>
+
+        <div class="card">
+          <h3>Select Models to Compare</h3>
+          <div class="model-checklist" id="benchModelList">
+            <!-- Populated by JS -->
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>Audio & Ground Truth (optional)</h3>
+          <div class="upload-zone small" id="benchUploadZone">
+            <p>Drop audio file here or <span class="link">browse</span></p>
+            <input type="file" id="benchFileInput" accept="audio/*" hidden />
+          </div>
+          <div class="file-info hidden" id="benchFileInfo">
+            <span id="benchFileName"></span>
+            <button class="btn btn-sm btn-ghost" id="clearBenchFile">Remove</button>
+          </div>
+          <textarea class="input mt" id="groundTruthInput"
+            placeholder="Optional: paste the expected transcription here to calculate WER (Word Error Rate)"></textarea>
+          <button class="btn btn-accent btn-lg mt" id="runBenchmarkBtn" disabled>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="22" y1="2" x2="11" y2="13"/><polygon points="22,2 15,22 11,13 2,9"/>
+            </svg>
+            Run Benchmark
+          </button>
+        </div>
+
+        <!-- Benchmark Results -->
+        <div class="card hidden" id="benchResultsCard">
+          <h3>Benchmark Results</h3>
+          <div class="bench-table-wrap">
+            <table class="bench-table" id="benchTable">
+              <thead>
+                <tr>
+                  <th>Model</th>
+                  <th>Duration</th>
+                  <th>Process Time</th>
+                  <th>RTF</th>
+                  <th>VRAM</th>
+                  <th>WER</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody id="benchTableBody"></tbody>
+            </table>
+          </div>
+          <div class="bench-report" id="benchReport"></div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- Toast container -->
+  <div class="toast-container" id="toastContainer"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

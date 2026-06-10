@@ -1,0 +1,39 @@
+# ─── Python ───────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+
+# ─── Virtual Environment ─────────────────────
+.venv/
+venv/
+env/
+
+# ─── User Data / Uploads ─────────────────────
+uploads/
+benchmark_results/
+test_audio/
+*.log
+
+# ─── IDE / Workspace ─────────────────────────
+.codebuddy/
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ─── OS ──────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ─── Electron ────────────────────────────────
+electron/node_modules/
+electron/dist/
+
+# ─── Temp / Debug ────────────────────────────
+_quick_test.py
+test_bench.py
+test_bench2.py

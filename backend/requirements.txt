@@ -1,0 +1,28 @@
+# === Core STT Engines ===
+faster-whisper>=1.1.1
+# Qwen3-ASR (uncomment when ready to test)
+# qwen-asr>=0.1.0
+# torch>=2.1.0
+
+# === Server ===
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+python-multipart>=0.0.12
+sse-starlette>=2.1.0
+
+# === Audio Processing ===
+soundfile>=0.12.1
+librosa>=0.10.0
+pydub>=0.25.1
+numpy>=1.26.0
+
+# === Benchmarking & System Monitoring ===
+psutil>=6.0.0
+gputil>=1.4.0
+pynvml>=12.0.0
+
+# === Utilities ===
+python-dotenv>=1.0.0
+rich>=13.0.0
+tqdm>=4.66.0
+click>=8.1.0
