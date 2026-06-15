@@ -22,6 +22,15 @@ const state = {
   benchAudioFile: null,
   benchModels: [],
   loadedModels: [],
+  // Realtime recording
+  selectedRealtimeModel: "small",
+  selectedRealtimeEngine: "faster-whisper",
+  mediaRecorder: null,
+  realtimeWs: null,
+  isRecording: false,
+  recordStartTime: null,
+  recordTimerInterval: null,
+  finalTranscript: "",
 };
 
 // ── DOM helpers ──────────────────────────────────────────────
@@ -103,6 +112,7 @@ async function loadModels() {
     const res = await fetch(`${API_BASE}/models`);
     state.loadedModels = await res.json();
     renderModelGrid();
+    renderRealtimeModelGrid();
     renderBenchModelList();
   } catch (e) {
     console.error("Failed to load models:", e);
@@ -195,6 +205,46 @@ function renderBenchModelList() {
       engine_type: cb.dataset.engine,
       compute_type: "int8",
     });
+  });
+}
+
+function renderRealtimeModelGrid() {
+  const grid = $("#realtimeModelGrid");
+  if (!grid) return;
+  grid.innerHTML = "";
+
+  const all = [];
+  for (const [engine, models] of Object.entries(state.loadedModels)) {
+    for (const m of models) {
+      all.push({ ...m, engine });
+    }
+  }
+
+  all.forEach((m) => {
+    const card = document.createElement("div");
+    card.className = "model-card";
+    if (m.model_id === state.selectedRealtimeModel) card.classList.add("selected");
+
+    const recLabel = m.recommended_for === "edge" ? "Edge" : "Batch";
+    const recClass = m.recommended_for === "edge" ? "" : "batch";
+
+    card.innerHTML = `
+      <div class="mc-name">${m.display_name}</div>
+      <div class="mc-specs">
+        <span>${m.param_count} params</span>
+        <span>${m.vram_requirement} VRAM</span>
+      </div>
+      <span class="mc-recommended ${recClass}">${recLabel}</span>
+    `;
+
+    card.addEventListener("click", () => {
+      $$("#realtimeModelGrid .model-card").forEach((c) => c.classList.remove("selected"));
+      card.classList.add("selected");
+      state.selectedRealtimeModel = m.model_id;
+      state.selectedRealtimeEngine = m.engine;
+    });
+
+    grid.appendChild(card);
   });
 }
 
@@ -491,6 +541,305 @@ function initCopy() {
   });
 }
 
+// ── Realtime Recording ───────────────────────────────────────
+function getWsUrl(path) {
+  if (window.location.protocol === "file:") {
+    return `ws://localhost:8765${path}`;
+  }
+  const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+  return `${protocol}://${window.location.host}${path}`;
+}
+
+async function startRecording() {
+  if (state.isRecording) return;
+
+  const btn = $("#recordBtn");
+  const modelId = state.selectedRealtimeModel;
+  const engineType = state.selectedRealtimeEngine;
+
+  // Reset final transcript
+  state.finalTranscript = "";
+  $("#realtimeTranscriptText").innerHTML =
+    '<span class="placeholder-text">Connecting...</span>';
+  $("#realtimeLangBadge").textContent = "Live";
+  $("#realtimeResultsCard").classList.remove("hidden");
+  $("#realtimeSegmentsDetail").style.display = "none";
+  $("#realtimeSegmentsList").innerHTML = "";
+
+  btn.disabled = true;
+  btn.innerHTML =
+    '<span class="spinner"></span> Connecting...';
+
+  try {
+    // Request microphone
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        channelCount: 1,
+        sampleRate: 16000,
+        echoCancellation: true,
+        noiseSuppression: true,
+      },
+    });
+
+    // Build WebSocket URL
+    const params = new URLSearchParams({
+      engine_type: engineType,
+      model_id: modelId,
+      compute_type: "int8",
+    });
+    const gpuIdx = getSelectedGpuIndex();
+    if (gpuIdx != null) params.set("device_index", String(gpuIdx));
+
+    const wsUrl = `${getWsUrl("/ws/realtime")}?${params.toString()}`;
+    const ws = new WebSocket(wsUrl);
+    state.realtimeWs = ws;
+    ws.binaryType = "blob";
+
+    // WebSocket event handlers
+    ws.onopen = () => {
+      console.log("[realtime] WS connected");
+    };
+
+    ws.onmessage = (event) => {
+      try {
+        const msg = JSON.parse(event.data);
+        handleRealtimeMessage(msg);
+      } catch {
+        // Binary message – ignore
+      }
+    };
+
+    ws.onerror = (err) => {
+      console.error("[realtime] WS error:", err);
+      showToast("WebSocket connection error", "error");
+    };
+
+    ws.onclose = (event) => {
+      console.log("[realtime] WS closed:", event.code, event.reason);
+      if (state.isRecording) {
+        stopRecordingInternal();
+      }
+    };
+
+    // Wait for "ready" from server (or timeout)
+    await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        reject(new Error("Server did not respond in time"));
+      }, 30000);
+
+      const origHandler = ws.onmessage;
+      ws.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data);
+          if (msg.type === "ready") {
+            clearTimeout(timeout);
+            ws.onmessage = origHandler;
+            resolve();
+            return;
+          }
+          if (msg.type === "error") {
+            clearTimeout(timeout);
+            reject(new Error(msg.message));
+            return;
+          }
+        } catch {
+          // ignore parse errors
+        }
+        // Pass to original handler
+        if (origHandler) origHandler(event);
+      };
+    });
+
+    // Create MediaRecorder (WebM/Opus)
+    let mimeType = "";
+    for (const m of ["audio/webm;codecs=opus", "audio/webm"]) {
+      if (MediaRecorder.isTypeSupported(m)) {
+        mimeType = m;
+        break;
+      }
+    }
+    if (!mimeType) {
+      throw new Error("Browser does not support audio recording (WebM/Opus)");
+    }
+
+    const recorder = new MediaRecorder(stream, { mimeType });
+    state.mediaRecorder = recorder;
+
+    recorder.ondataavailable = (event) => {
+      if (event.data.size > 0 && ws.readyState === WebSocket.OPEN) {
+        ws.send(event.data);
+      }
+    };
+
+    recorder.onstop = () => {
+      // Send STOP signal
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send("STOP");
+      }
+      // Stop all tracks
+      stream.getTracks().forEach((t) => t.stop());
+    };
+
+    // Start recording with 1-second chunks
+    recorder.start(1000);
+    state.isRecording = true;
+    state.recordStartTime = Date.now();
+
+    // Update UI
+    btn.className = "btn btn-danger btn-lg";
+    btn.innerHTML = `
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+        <rect x="6" y="4" width="12" height="16" rx="2"/>
+      </svg>
+      Stop Recording
+    `;
+    btn.disabled = false;
+
+    $("#recordingIndicator").classList.remove("hidden");
+    $("#recordStatus").textContent = "Recording";
+    $("#recordStatus").className = "record-status recording";
+
+    state.recordTimerInterval = setInterval(updateRecordTimer, 200);
+    $("#realtimeTranscriptText").innerHTML =
+      '<span class="placeholder-text">Listening...</span>';
+  } catch (e) {
+    console.error("[realtime] Start failed:", e);
+    showToast(`Failed to start recording: ${e.message}`, "error");
+    stopRecordingInternal();
+  }
+}
+
+function stopRecording() {
+  if (!state.isRecording) return;
+  stopRecordingInternal();
+}
+
+function stopRecordingInternal() {
+  state.isRecording = false;
+
+  // Stop MediaRecorder
+  if (state.mediaRecorder && state.mediaRecorder.state !== "inactive") {
+    state.mediaRecorder.stop();
+  }
+  state.mediaRecorder = null;
+
+  // Close WebSocket
+  if (state.realtimeWs) {
+    if (state.realtimeWs.readyState === WebSocket.OPEN) {
+      state.realtimeWs.close(1000, "User stopped");
+    }
+    state.realtimeWs = null;
+  }
+
+  // Reset UI
+  const btn = $("#recordBtn");
+  btn.className = "btn btn-danger btn-lg";
+  btn.innerHTML = `
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+      <circle cx="12" cy="12" r="8"/>
+    </svg>
+    Start Recording
+  `;
+  btn.disabled = false;
+
+  $("#recordingIndicator").classList.add("hidden");
+  $("#recordStatus").textContent = "";
+  $("#recordStatus").className = "record-status";
+
+  if (state.recordTimerInterval) {
+    clearInterval(state.recordTimerInterval);
+    state.recordTimerInterval = null;
+  }
+  state.recordStartTime = null;
+}
+
+function handleRealtimeMessage(msg) {
+  switch (msg.type) {
+    case "result":
+      if (msg.final) {
+        // Final result – show full transcript with metrics
+        renderRealtimeResult(msg);
+      } else {
+        // Partial – update live text
+        const el = $("#realtimeTranscriptText");
+        el.textContent = msg.text || "(silence)";
+        state.finalTranscript = msg.text || "";
+
+        // Update segments
+        if (msg.segments && msg.segments.length > 0) {
+          const segDetail = $("#realtimeSegmentsDetail");
+          segDetail.style.display = "block";
+          $("#realtimeSegmentsList").innerHTML = msg.segments
+            .map(
+              (s) =>
+                `<div class="segment-item">
+                  <span class="seg-time">${fmtTime(s.start)} → ${fmtTime(s.end)}</span>
+                  <span class="seg-text">${escapeHtml(s.text)}</span>
+                </div>`
+            )
+            .join("");
+        }
+      }
+      break;
+
+    case "status":
+      // No new speech in this chunk
+      break;
+
+    case "error":
+      console.error("[realtime] Server error:", msg.message);
+      showToast(`Transcription error: ${msg.message}`, "error");
+      break;
+
+    case "keepalive":
+      // Server is still there
+      break;
+
+    case "ready":
+      // Already handled during connection
+      break;
+
+    default:
+      console.log("[realtime] Unknown message type:", msg.type);
+  }
+}
+
+function renderRealtimeResult(data) {
+  if (!data.text) {
+    $("#realtimeTranscriptText").textContent = "(No speech detected)";
+    return;
+  }
+
+  state.finalTranscript = data.text;
+  $("#realtimeTranscriptText").textContent = data.text;
+  $("#realtimeLangBadge").textContent = `🌐 ${data.language || "unknown"}`;
+
+  if (data.segments && data.segments.length > 0) {
+    const segDetail = $("#realtimeSegmentsDetail");
+    segDetail.style.display = "block";
+    $("#realtimeSegmentsList").innerHTML = data.segments
+      .map(
+        (s) =>
+          `<div class="segment-item">
+            <span class="seg-time">${fmtTime(s.start)} → ${fmtTime(s.end)}</span>
+            <span class="seg-text">${escapeHtml(s.text)}</span>
+          </div>`
+      )
+      .join("");
+  }
+
+  showToast("Recording complete!", "success");
+}
+
+function updateRecordTimer() {
+  if (!state.recordStartTime) return;
+  const elapsed = Math.floor((Date.now() - state.recordStartTime) / 1000);
+  const mins = Math.floor(elapsed / 60);
+  const secs = elapsed % 60;
+  $("#recordTimer").textContent =
+    `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+}
+
 // ── Init ─────────────────────────────────────────────────────
 async function init() {
   initTabs();
@@ -524,6 +873,26 @@ async function init() {
   // Benchmark button
   $("#runBenchmarkBtn").addEventListener("click", runBenchmark);
 
+  // Realtime recording button – single handler, dispatches by state
+  function handleRecordClick() {
+    if (state.isRecording) {
+      stopRecording();
+    } else {
+      startRecording();
+    }
+  }
+  $("#recordBtn").addEventListener("click", handleRecordClick);
+
+  // Realtime copy button
+  $("#realtimeCopyBtn").addEventListener("click", () => {
+    const text = state.finalTranscript || $("#realtimeTranscriptText").textContent;
+    navigator.clipboard.writeText(text).then(() => {
+      showToast("Copied to clipboard!", "success");
+    }).catch(() => {
+      showToast("Failed to copy", "error");
+    });
+  });
+
   // Copy button
   initCopy();
 
@@ -538,6 +907,7 @@ async function init() {
     console.log("Server returned empty model list, showing demo cache");
     state.loadedModels = getFallbackModels();
     renderModelGrid();
+    renderRealtimeModelGrid();
     renderBenchModelList();
   }
 }

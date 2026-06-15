@@ -88,8 +88,10 @@ _INFERENCE_TIMEOUT_SEC = int(os.environ.get("ASR_TIMEOUT_SEC", "300"))
 # Single shared executor so we don't block the event loop on future.result()
 _inference_pool = ThreadPoolExecutor(max_workers=2)
 
+from contextlib import asynccontextmanager
+
 import uvicorn
-from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -471,6 +473,195 @@ async def api_recommendations(vram_mb: Optional[int] = Query(None)):
 
     return {"recommendations": recs, "total": len(recs)}
 
+
+# ─── WebSocket: Real-time recording transcription ─────────────
+@app.websocket("/ws/realtime")
+async def websocket_realtime(
+    websocket: WebSocket,
+    engine_type: str = "faster-whisper",
+    model_id: str = "small",
+    language: Optional[str] = None,
+    device_index: Optional[int] = None,
+    compute_type: str = "int8",
+):
+    """Real-time transcription via WebSocket. Client sends binary audio
+    chunks (WebM/Opus from MediaRecorder), server accumulates and transcribes,
+    sending back incremental JSON results."""
+    await websocket.accept()
+    print(f"[ws:{id(websocket)}] Connected – engine={engine_type} model={model_id}", flush=True)
+
+    gpu_idx = device_index if device_index is not None else _DEFAULT_GPU_INDEX
+    device_str = "cuda"
+    engine = None
+    accumulated_chunks: list[bytes] = []
+    last_text = ""
+    chunk_count = 0
+
+    try:
+        # Load engine once for this connection
+        config = EngineConfig(
+            engine_type=engine_type,
+            model_id=model_id,
+            language=language,
+            device=device_str,
+            device_index=gpu_idx,
+            compute_type=compute_type,
+        )
+        key = _engine_key(engine_type, model_id, f"{device_str}:{gpu_idx}")
+        if key in _active_engines:
+            engine = _active_engines[key]
+        else:
+            print(f"[ws:{id(websocket)}] Loading {engine_type}/{model_id}...", flush=True)
+            engine = get_engine(config)
+            engine.load()
+            _active_engines[key] = engine
+            print(f"[ws:{id(websocket)}] Model loaded.", flush=True)
+
+        await websocket.send_json({"type": "ready", "model": model_id})
+
+        while True:
+            # Receive binary audio chunk (WebM/Opus from MediaRecorder)
+            try:
+                data = await asyncio.wait_for(websocket.receive_bytes(), timeout=30.0)
+            except asyncio.TimeoutError:
+                # No data for 30s – send keepalive
+                await websocket.send_json({"type": "keepalive"})
+                continue
+
+            # Check for stop signal (client sends "STOP" as text)
+            if data == b"STOP":
+                print(f"[ws:{id(websocket)}] Stop signal received.", flush=True)
+                break
+
+            accumulated_chunks.append(data)
+            chunk_count += 1
+
+            # Transcribe every 4 chunks (~3 seconds of audio at MediaRecorder default)
+            if chunk_count % 4 == 0 and accumulated_chunks:
+                # Merge all chunks into a single WebM buffer
+                merged = b"".join(accumulated_chunks)
+                # Save to temp file
+                temp_path = _upload_dir / f"ws_{id(websocket)}_{chunk_count}.webm"
+                temp_path.write_bytes(merged)
+                wav_path = temp_path.with_suffix(".wav")
+
+                try:
+                    # Convert WebM → WAV via pydub
+                    from pydub import AudioSegment
+                    audio = AudioSegment.from_file(str(temp_path))
+                    audio = audio.set_frame_rate(16000).set_channels(1)
+                    audio.export(str(wav_path), format="wav")
+
+                    # Run inference (non-blocking)
+                    loop = asyncio.get_running_loop()
+                    fut = loop.run_in_executor(
+                        _inference_pool, engine.transcribe, str(wav_path)
+                    )
+                    try:
+                        result = await asyncio.wait_for(fut, timeout=60.0)
+                    except asyncio.TimeoutError:
+                        await websocket.send_json({
+                            "type": "error",
+                            "message": "Transcription timed out",
+                        })
+                        continue
+
+                    # Only send if text changed
+                    new_text = result.text.strip()
+                    if new_text and new_text != last_text:
+                        last_text = new_text
+                        await websocket.send_json({
+                            "type": "result",
+                            "text": new_text,
+                            "partial": True,
+                            "segments": [
+                                {"start": s.start, "end": s.end, "text": s.text}
+                                for s in result.segments
+                            ],
+                            "rtf": result.real_time_factor,
+                            "chunk": chunk_count,
+                        })
+                    else:
+                        await websocket.send_json({
+                            "type": "status",
+                            "message": "No new speech detected",
+                            "chunk": chunk_count,
+                        })
+                except Exception as e:
+                    print(f"[ws:{id(websocket)}] Chunk error: {e}", flush=True)
+                    await websocket.send_json({
+                        "type": "error",
+                        "message": f"Chunk processing error: {e}",
+                    })
+                finally:
+                    # Cleanup temp files
+                    try:
+                        temp_path.unlink()
+                    except Exception:
+                        pass
+                    try:
+                        wav_path.unlink()
+                    except Exception:
+                        pass
+
+        # Final transcription of remaining audio
+        if accumulated_chunks:
+            merged = b"".join(accumulated_chunks)
+            temp_path = _upload_dir / f"ws_{id(websocket)}_final.webm"
+            temp_path.write_bytes(merged)
+            wav_path = temp_path.with_suffix(".wav")
+
+            try:
+                from pydub import AudioSegment
+                audio = AudioSegment.from_file(str(temp_path))
+                audio = audio.set_frame_rate(16000).set_channels(1)
+                audio.export(str(wav_path), format="wav")
+
+                loop = asyncio.get_running_loop()
+                fut = loop.run_in_executor(
+                    _inference_pool, engine.transcribe, str(wav_path)
+                )
+                result = await asyncio.wait_for(fut, timeout=120.0)
+
+                final_text = result.text.strip()
+                await websocket.send_json({
+                    "type": "result",
+                    "text": final_text or last_text,
+                    "partial": False,
+                    "final": True,
+                    "segments": [
+                        {"start": s.start, "end": s.end, "text": s.text}
+                        for s in result.segments
+                    ],
+                    "stats": {
+                        "duration_s": result.duration_seconds,
+                        "processing_time_s": result.processing_time_seconds,
+                        "rtf": result.real_time_factor,
+                        "peak_vram_mb": result.peak_vram_mb,
+                    },
+                })
+            except Exception as e:
+                print(f"[ws:{id(websocket)}] Final error: {e}", flush=True)
+            finally:
+                try:
+                    temp_path.unlink()
+                except Exception:
+                    pass
+                try:
+                    wav_path.unlink()
+                except Exception:
+                    pass
+
+        await websocket.send_json({"type": "done"})
+
+    except WebSocketDisconnect:
+        print(f"[ws:{id(websocket)}] Disconnected ({chunk_count} chunks)", flush=True)
+    except Exception as e:
+        print(f"[ws:{id(websocket)}] Error: {e}", flush=True)
+        try:
+            await websocket.send_json({"type": "error", "message": str(e)})
+        except Exception:
+            pass
 
 # ─── Static frontend (mounted last so /api/* routes take priority) ──
 class SPAStaticFiles(StaticFiles):

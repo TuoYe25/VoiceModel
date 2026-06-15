@@ -26,6 +26,13 @@
           </svg>
           Transcribe
         </a>
+        <a href="#" class="nav-item" data-tab="realtime">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="10"/>
+            <circle cx="12" cy="12" r="3" fill="currentColor"/>
+          </svg>
+          Realtime
+        </a>
         <a href="#" class="nav-item" data-tab="benchmark">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <line x1="18" y1="20" x2="18" y2="10"/>
@@ -104,6 +111,59 @@
           <details class="segments-detail">
             <summary>Segments with timestamps</summary>
             <div class="segments-list" id="segmentsList"></div>
+          </details>
+        </div>
+      </section>
+
+      <!-- Realtime Tab -->
+      <section class="tab-panel" id="tab-realtime">
+        <div class="panel-header">
+          <h1>Real-time Recording</h1>
+          <p>Record from microphone and transcribe live using the selected model.</p>
+        </div>
+
+        <!-- Model Selector -->
+        <div class="card">
+          <h3>Select Model</h3>
+          <div class="model-grid" id="realtimeModelGrid">
+            <!-- Populated by JS -->
+          </div>
+        </div>
+
+        <!-- Recording Controls -->
+        <div class="card">
+          <h3>Microphone</h3>
+          <div class="realtime-controls">
+            <button class="btn btn-danger btn-lg" id="recordBtn">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+                <circle cx="12" cy="12" r="8"/>
+              </svg>
+              Start Recording
+            </button>
+            <span class="record-timer" id="recordTimer">00:00</span>
+            <span class="record-status" id="recordStatus"></span>
+          </div>
+          <div class="realtime-indicator hidden" id="recordingIndicator">
+            <span class="recording-dot"></span>
+            <span>Recording in progress...</span>
+          </div>
+        </div>
+
+        <!-- Live Transcript -->
+        <div class="card hidden" id="realtimeResultsCard">
+          <h3>Live Transcription</h3>
+          <div class="transcript-box" id="realtimeTranscriptBox">
+            <div class="transcript-header">
+              <span class="lang-badge" id="realtimeLangBadge">Live</span>
+              <button class="btn btn-sm btn-ghost" id="realtimeCopyBtn">Copy</button>
+            </div>
+            <div class="transcript-text" id="realtimeTranscriptText">
+              <span class="placeholder-text">Waiting for speech...</span>
+            </div>
+          </div>
+          <details class="segments-detail" id="realtimeSegmentsDetail" style="display:none">
+            <summary>Segments with timestamps</summary>
+            <div class="segments-list" id="realtimeSegmentsList"></div>
           </details>
         </div>
       </section>

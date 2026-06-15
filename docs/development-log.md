@@ -186,4 +186,80 @@ Chinese-optimized:  Qwen3-ASR 0.6B / 1.7B
 
 ---
 
-*Document generated 2026-06-08, updated 2026-06-09 as part of the Altar Voice Model project.*
+## Phase 5: Real-time Recording & Live Transcription (2026-06-15)
+
+### Feature Summary
+Added a full-duplex real-time recording pipeline: microphone capture → WebSocket streaming →
+incremental ASR transcription → live UI updates, all without touching the disk more than
+temporarily.
+
+### Architecture
+
+```
+Browser                         Backend /ws/realtime
+  │ (MediaRecorder, WebM/Opus)          │
+  │──── binary chunk (1s) ─────────────►│ Accumulate
+  │──── binary chunk                     │
+  │──── binary chunk                     │
+  │──── binary chunk (every 4th) ──────►│ Merge → WebM→WAV → Transcribe
+  │◄─── {"type":"result", partial} ────│ Streaming JSON
+  │ ... (loop) ...                      │
+  │──── "STOP" (text) ─────────────────►│ Final transcription
+  │◄─── {"type":"result", final} ──────│ Full result with segments
+```
+
+### Backend Changes (`server.py`)
+- **New WebSocket endpoint** `/ws/realtime`: Accepts binary audio chunks (WebM/Opus from
+  MediaRecorder), accumulates every 4 chunks (~3s audio), converts to 16kHz mono WAV via
+  pydub, runs inference via `loop.run_in_executor()`, and streams JSON results back.
+- **Protocol messages**: `ready` (model loaded), `result` (partial/final transcription with
+  segments & RTF), `status` (no new speech), `error`, `keepalive` (30s timeout), `done`.
+- **Model persistence**: Engine loaded once per connection, reused across all chunks.
+- **SPAStaticFiles** class: Serves frontend files with fallback to `index.html` for
+  client-side routing.
+
+### Frontend Changes (`frontend/`)
+
+**`index.html`** — New Realtime tab:
+- Model selection grid (same card layout as Transcribe tab)
+- Recording controls: Start/Stop button, MM:SS timer, recording status indicator
+- Live transcript display with language badge and copy button
+- Segments detail panel with timestamps
+
+**`app.js`** — Core realtime logic (+~370 lines):
+- `getWsUrl()`: Auto-derives WebSocket URL from page protocol (ws:// or wss://)
+- `startRecording()`: `getUserMedia` → `MediaRecorder` (WebM/Opus, 1s intervals) →
+  WebSocket handshake with `ready` acknowledgment → binary chunk streaming
+- `stopRecording()` / `stopRecordingInternal()`: Sends "STOP" text → processes final
+  result → closes connection → resets UI
+- `handleRealtimeMessage()`: Dispatches `result` (partial renders live text + segments;
+  final renders complete transcript), `status`, `error`, `keepalive`
+- `renderRealtimeResult()`: Renders full transcription, language badge, timestamped segments
+- `updateRecordTimer()`: 200ms interval MM:SS display
+- Single `handleRecordClick` dispatcher to switch between start/stop
+
+**`styles.css`** — New styles (+~60 lines):
+- `.realtime-controls`: Flex layout for record button + timer + status
+- `.record-timer`: Monospace font counter
+- `.btn-danger`: Red record/stop button
+- `.recording-dot` + `@keyframes pulse-dot`: Breathing red dot animation
+- `.realtime-indicator`: "Recording in progress..." alert bar
+- `.placeholder-text`: Muted italic placeholder for empty transcript
+
+### Bug Fixes
+- **Stop button unresponsive**: Button initially only had `startRecording` bound.
+  Fixed with `handleRecordClick` dispatcher that checks `state.isRecording` to call
+  `startRecording()` or `stopRecording()`.
+
+### Technical Decisions
+- **WebM/Opus instead of raw PCM**: MediaRecorder's native format; pydub handles the
+  conversion to 16kHz mono WAV on the server side.
+- **4-chunk batching**: Balances latency (~3s) against inference overhead — avoids
+  calling the model on every 1s chunk.
+- **Single WS connection**: Model stays loaded for the session; no reload between chunks.
+- **No WebRTC**: Simpler WebSocket approach sufficient for localhost; WebRTC would add
+  unnecessary complexity for a local desktop app.
+
+---
+
+*Document generated 2026-06-08, updated 2026-06-15 as part of the Altar Voice Model project.*
