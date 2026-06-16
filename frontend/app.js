@@ -52,10 +52,22 @@ function showToast(message, type = "info") {
   }, 3000);
 }
 
+// ── Fetch helper with timeout ─────────────────────────────────
+async function fetchWithTimeout(url, options = {}, timeoutMs = 10000) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { ...options, signal: controller.signal });
+    return res;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 // ── Status Bar ───────────────────────────────────────────────
 async function checkHealth() {
   try {
-    const res = await fetch(`${API_BASE}/health`);
+    const res = await fetchWithTimeout(`${API_BASE}/health`, {}, 8000);
     const data = await res.json();
     const dot = $("#statusDot");
     const text = $("#statusText");
@@ -109,7 +121,7 @@ function initTabs() {
 // ── Model Loading ────────────────────────────────────────────
 async function loadModels() {
   try {
-    const res = await fetch(`${API_BASE}/models`);
+    const res = await fetchWithTimeout(`${API_BASE}/models`, {}, 12000);
     state.loadedModels = await res.json();
     renderModelGrid();
     renderRealtimeModelGrid();
