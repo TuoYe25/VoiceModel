@@ -77,12 +77,36 @@ def _inject_cuda_dlls() -> None:
 
 _inject_cuda_dlls()
 
-# ─── GPU selection ─────────────────────────────────────────────
-# Default = 1 (the 5070 Ti in your laptop). Override with `set ASR_GPU_INDEX=0`
-# or pass ?device_index=0 in the request.
-# NOTE: Do NOT set CUDA_VISIBLE_DEVICES – it remaps indices and conflicts
-# with faster‑whisper’s `device_index` kwarg ("invalid device ordinal").
-_DEFAULT_GPU_INDEX = int(os.environ.get("ASR_GPU_INDEX", "1"))
+# ─── Cross-platform device detection ───────────────────────────
+def _detect_device() -> tuple[str, int]:
+    """Return (device_type, device_index) for the current platform.
+    - Windows + NVIDIA GPU → ("cuda", gpu_index)
+    - macOS / no CUDA       → ("cpu", 0)
+    """
+    try:
+        import torch
+        if torch.cuda.is_available():
+            idx = int(os.environ.get("ASR_GPU_INDEX", "1"))
+            if idx >= torch.cuda.device_count():
+                idx = 0
+            return ("cuda", idx)
+    except Exception:
+        pass
+    try:
+        import pynvml
+        pynvml.nvmlInit()
+        count = pynvml.nvmlDeviceGetCount()
+        pynvml.nvmlShutdown()
+        if count > 0:
+            idx = int(os.environ.get("ASR_GPU_INDEX", "1"))
+            if idx >= count:
+                idx = 0
+            return ("cuda", idx)
+    except Exception:
+        pass
+    return ("cpu", 0)
+
+_DEVICE_TYPE, _DEFAULT_GPU_INDEX = _detect_device()
 _INFERENCE_TIMEOUT_SEC = int(os.environ.get("ASR_TIMEOUT_SEC", "300"))
 
 # Single shared executor so we don't block the event loop on future.result()
@@ -185,7 +209,7 @@ async def api_transcribe(
     engine_type: str = Query("faster-whisper"),
     model_id: str = Query("small"),
     language: Optional[str] = Query(None),
-    device: str = Query("cuda"),
+    device: str = Query(_DEVICE_TYPE),
     device_index: Optional[int] = Query(None),
     compute_type: str = Query("int8"),
 ):
@@ -320,7 +344,7 @@ async def api_benchmark(
                 engine_type=m.get("engine_type", "faster-whisper"),
                 model_id=m["model_id"],
                 compute_type=m.get("compute_type", "int8"),
-                device=m.get("device", "cuda"),
+                device=m.get("device", _DEVICE_TYPE),
                 device_index=gpu_idx,
             )
             for m in model_list
@@ -491,7 +515,7 @@ async def websocket_realtime(
     print(f"[ws:{id(websocket)}] Connected – engine={engine_type} model={model_id}", flush=True)
 
     gpu_idx = device_index if device_index is not None else _DEFAULT_GPU_INDEX
-    device_str = "cuda"
+    device_str = _DEVICE_TYPE
     engine = None
     accumulated_chunks: list[bytes] = []
     last_text = ""
