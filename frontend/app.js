@@ -237,8 +237,9 @@ function renderRealtimeModelGrid() {
     card.className = "model-card";
     if (m.model_id === state.selectedRealtimeModel) card.classList.add("selected");
 
-    const recLabel = m.recommended_for === "edge" ? "Edge" : "Batch";
-    const recClass = m.recommended_for === "edge" ? "" : "batch";
+    const recMap = { edge: "Edge", batch: "Batch", "real-time": "Real-time" };
+    const recLabel = recMap[m.recommended_for] || m.recommended_for;
+    const recClass = m.recommended_for === "edge" ? "" : m.recommended_for === "real-time" ? "real-time" : "batch";
 
     card.innerHTML = `
       <div class="mc-name">${m.display_name}</div>

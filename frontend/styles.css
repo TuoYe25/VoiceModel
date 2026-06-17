@@ -230,6 +230,11 @@ body {
   color: var(--accent);
 }
 
+.model-card .mc-recommended.real-time {
+  background: rgba(210, 153, 34, 0.15);
+  color: var(--warning);
+}
+
 .model-checklist {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
